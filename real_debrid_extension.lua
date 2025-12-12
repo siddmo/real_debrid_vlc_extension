@@ -1,15 +1,15 @@
 
--- Real-Debrid File Selector for VLC (Mac V8 - Smart Focus)
+-- Real-Debrid File Selector for VLC (Mac V9 - Clipboard Auto-Run)
 -- Save as: real_debrid_player.lua
 
 function descriptor()
     return {
         title = "Real-Debrid Selector",
-        version = "8.0",
+        version = "9.0",
         author = "User",
         url = "https://real-debrid.com/",
         shortdesc = "Stream from Real-Debrid",
-        description = "Smart Focus: Cursor jumps to Magnet link if Token is saved.",
+        description = "Auto-reads Clipboard on startup for instant loading.",
         capabilities = {"input-listener"}
     }
 end
@@ -31,6 +31,10 @@ local api_token = ""
 function activate()
     api_token = load_config()
     create_dialog()
+    
+    -- NEW: Auto-check clipboard 0.5 seconds after UI loads
+    -- We can't use a timer easily in basic Lua, so we just run it directly
+    check_clipboard_and_run()
 end
 
 function deactivate()
@@ -44,46 +48,46 @@ end
 function create_dialog()
     dlg = vlc.dialog("Real-Debrid Player")
     
-    -- SMART FOCUS LOGIC
-    -- VLC gives focus to the first widget created in code.
-    -- We change creation order based on whether we have a token.
-    
+    -- Smart Focus Logic
     if api_token and api_token ~= "" then
-        -- SCENARIO A: User has token. Focus Magnet (Row 2).
-        
-        -- 1. Create Magnet Input FIRST (Row 2)
         dlg:add_label("Magnet:", 1, 2, 1, 1)
         magnet_input = dlg:add_text_input("", 2, 2, 3, 1)
-        
-        -- 2. Create Token Input SECOND (Row 1)
         dlg:add_label("API Token:", 1, 1, 1, 1)
         token_input = dlg:add_text_input(api_token, 2, 1, 3, 1)
     else
-        -- SCENARIO B: No token. Focus Token Input (Row 1).
-        
-        -- 1. Create Token Input FIRST (Row 1)
         dlg:add_label("API Token:", 1, 1, 1, 1)
         token_input = dlg:add_text_input(api_token, 2, 1, 3, 1)
-        
-        -- 2. Create Magnet Input SECOND (Row 2)
         dlg:add_label("Magnet:", 1, 2, 1, 1)
         magnet_input = dlg:add_text_input("", 2, 2, 3, 1)
     end
     
-    -- Row 3: Load Button
     dlg:add_button("Load Files", click_load, 5, 2, 1, 1)
-    
-    -- Row 4: Dropdown
     dlg:add_label("File:", 1, 3, 1, 1)
     file_dropdown = dlg:add_dropdown(2, 3, 3, 1)
-    
-    -- Row 5: Play Button
     dlg:add_button("Start & Play", click_play, 5, 3, 1, 1)
-    
-    -- Row 6: Status
-    status_label = dlg:add_label("Enter Magnet to start.", 1, 4, 5, 1)
+    status_label = dlg:add_label("Ready.", 1, 4, 5, 1)
     
     dlg:show()
+end
+
+-- ===========================
+-- CLIPBOARD LOGIC (NEW)
+-- ===========================
+
+function check_clipboard_and_run()
+    -- Read Mac Clipboard using pbpaste
+    local handle = io.popen("pbpaste")
+    local clipboard = handle:read("*a")
+    handle:close()
+    
+    if clipboard and string.match(clipboard, "^magnet:%?") then
+        if magnet_input then
+            magnet_input:set_text(clipboard)
+            update_status("Magnet detected in clipboard! Auto-loading...")
+            -- Trigger load logic immediately
+            click_load()
+        end
+    end
 end
 
 -- ===========================
@@ -120,29 +124,24 @@ end
 -- ===========================
 
 function click_load()
-    -- 1. Get and Save Token
     local token_val = token_input:get_text()
     if token_val == "" then
         update_status("Error: Please enter API Token.")
         return
     end
-    
     api_token = token_val
     save_config(api_token)
 
-    -- 2. Get Magnet
     local magnet = magnet_input:get_text()
     if magnet == "" then 
         update_status("Error: No magnet link.")
         return 
     end
 
-    -- Reset State
     file_map = {} 
     file_dropdown:clear() 
     current_torrent_id = nil
 
-    -- 3. Check for Existing (Smart Resume)
     local hash = string.match(magnet, "btih:([a-zA-Z0-9]+)")
     if hash then
         update_status("Checking active torrents...")
@@ -155,7 +154,6 @@ function click_load()
         end
     end
 
-    -- 4. Add New Magnet
     update_status("Adding new torrent...")
     local encoded_magnet = vlc.strings.encode_uri_component(magnet)
     encoded_magnet = string.gsub(encoded_magnet, "'", "%%27")
@@ -207,7 +205,6 @@ function click_play()
     local select_url = "https://api.real-debrid.com/rest/1.0/torrents/selectFiles/" .. current_torrent_id
     post_req(select_url, "files=" .. selected_file_id)
 
-    -- Poll for download link
     local info_url = "https://api.real-debrid.com/rest/1.0/torrents/info/" .. current_torrent_id
     local final_link = nil
     
@@ -221,7 +218,6 @@ function click_play()
         elseif status == "downloading" then
              update_status("Buffering... ("..i.."/10)")
         end
-        
         local t = os.time()
         while os.time() < t + 1 do end
     end
@@ -274,7 +270,6 @@ function parse_and_fill_dropdown(json)
     for id, path, bytes in string.gmatch(json, '"id"%s*:%s*(%d+).-"path"%s*:%s*"(.-)".-"bytes"%s*:%s*(%d+)') do
         if string.sub(path, 1, 1) == "/" then path = string.sub(path, 2) end
         
-        -- Trim name for UI
         local display_name = path
         if string.len(display_name) > 55 then
              display_name = string.sub(display_name, 1, 52) .. "..."
@@ -282,7 +277,6 @@ function parse_and_fill_dropdown(json)
         
         local size_str = format_size(bytes)
         local display_text = string.format("%s (%s)", display_name, size_str)
-        
         file_dropdown:add_value(display_text, index)
         file_map[index] = id
         
@@ -312,13 +306,8 @@ function update_status(msg)
     vlc.msg.info("RD-Ext: " .. msg)
 end
 
--- ===========================
--- MACOS HTTP HELPERS
--- ===========================
-
 function get_req(url)
-    local cmd = string.format("/usr/bin/curl -k -s -X GET -H 'Authorization: Bearer %s' '%s'", 
-        api_token, url)
+    local cmd = string.format("/usr/bin/curl -k -s -X GET -H 'Authorization: Bearer %s' '%s'", api_token, url)
     local handle = io.popen(cmd)
     local result = handle:read("*a")
     handle:close()
@@ -326,8 +315,7 @@ function get_req(url)
 end
 
 function post_req(url, body)
-    local cmd = string.format("/usr/bin/curl -k -s -X POST -H 'Authorization: Bearer %s' -d '%s' '%s'", 
-        api_token, body, url)
+    local cmd = string.format("/usr/bin/curl -k -s -X POST -H 'Authorization: Bearer %s' -d '%s' '%s'", api_token, body, url)
     local handle = io.popen(cmd)
     local result = handle:read("*a")
     handle:close()
